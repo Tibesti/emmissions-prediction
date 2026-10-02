@@ -10,6 +10,11 @@ a "feed-forward" neural network — the simplest kind — which will later be
 compared against an LSTM and a Transformer. This script trains one model per
 pollutant, scores both against a naive baseline, and saves twelve figures.
 
+Strictly, the network predicts the CHANGE from the last known hour, and the
+forecast is "last hour + predicted change". data_prep.change_targets()
+explains why; the Transformer does exactly the same, so the comparison
+between the two is about architecture only.
+
 HOW TO RUN IT
 -------------
     .venv/bin/python train_ann.py
@@ -29,10 +34,10 @@ for you by TensorFlow.
 
 THE ONE THING THAT MAKES AN *ANN* DIFFERENT FROM AN LSTM
 --------------------------------------------------------
-An ANN has no concept of order. We hand it a 24-hour x 18-feature window, but
-the very first thing it does is FLATTEN that into one long row of 432 numbers.
+An ANN has no concept of order. We hand it a 24-hour x 17-feature window, but
+the very first thing it does is FLATTEN that into one long row of 408 numbers.
 It does not know that number 5 came one hour before number 23. It has to
-rediscover any time structure from scratch, treating each of the 432 slots as
+rediscover any time structure from scratch, treating each of the 408 slots as
 an independent variable.
 
 That is precisely the limitation the LSTM and Transformer are designed to fix,
@@ -101,21 +106,21 @@ def build_ann(lookback: int, n_features: int) -> keras.Model:
     model = keras.Sequential(name="ANN_emissions_forecaster")
 
     # --- INPUT ------------------------------------------------------------
-    # Declares the shape of one training example: 24 hours x 18 features.
+    # Declares the shape of one training example: 24 hours x 17 features.
     # Note we describe ONE window here; the batch dimension is implicit.
     model.add(keras.Input(shape=(lookback, n_features)))
 
     # --- FLATTEN ----------------------------------------------------------
     # THIS is the line that makes it an ANN rather than a sequence model.
-    # It reshapes the 24 x 18 grid into a single row of 432 numbers, discarding
+    # It reshapes the 24 x 17 grid into a single row of 408 numbers, discarding
     # all information about which hour each number came from. Everything below
-    # this line treats those 432 values as 432 unrelated inputs.
+    # this line treats those 408 values as 408 unrelated inputs.
     model.add(layers.Flatten())
 
     # --- HIDDEN LAYERS ----------------------------------------------------
     for i, units in enumerate(HIDDEN_UNITS, start=1):
         # Dense = "fully connected": every input connects to every neuron.
-        # A 432 -> 256 Dense layer therefore holds 432*256 + 256 = 110,848
+        # A 408 -> 256 Dense layer therefore holds 408*256 + 256 = 104,704
         # learnable numbers. This is where the pattern actually gets stored.
         model.add(layers.Dense(units, name=f"dense_{i}"))
 
@@ -140,7 +145,7 @@ def build_ann(lookback: int, n_features: int) -> keras.Model:
 
     # --- OUTPUT -----------------------------------------------------------
     # One neuron, no activation function. One neuron because we predict a
-    # single number (next hour's emissions). NO activation because this is
+    # single number (next hour's change in emissions). NO activation because this is
     # regression — the output must be free to take any value. Putting a ReLU or
     # sigmoid here is a classic beginner mistake that silently caps what the
     # model can predict.
@@ -150,10 +155,12 @@ def build_ann(lookback: int, n_features: int) -> keras.Model:
     model.compile(
         # Adam is the standard optimiser: it adapts the step size per weight.
         optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        # Mean Squared Error squares each mistake before averaging, so large
-        # misses are punished disproportionately. Appropriate here: badly
-        # missing a high-emission hour matters more than a small everyday slip.
-        loss="mse",
+        # Huber loss is squared for small mistakes (like MSE) and linear for
+        # large ones (like MAE). The rare startup/shutdown ramps produce huge
+        # hour-to-hour changes; under MSE those few hours dominate training
+        # and the everyday hours suffer. Huber stops them dominating. Chosen
+        # over MSE on the VALIDATION set (lower MAE, same RMSE).
+        loss=keras.losses.Huber(delta=1.0),
         # Tracked for reporting only — it does not steer training.
         metrics=["mae"],
     )
@@ -193,6 +200,64 @@ def evaluate(y_true, y_pred, persistence) -> dict:
     return {"model": score(y_pred), "persistence": score(persistence)}
 
 
+def train(data: dict, seed: int = SEED, verbose: int = 2):
+    """Build and fit one ANN on the scaled hour-to-hour change.
+
+    Returns (model, history, change_scaler, train_seconds). Kept separate from
+    run_for_target() so compare_models.py can retrain with several seeds.
+    """
+    keras.utils.set_random_seed(seed)
+    y_train_change, y_val_change, change_scaler = data_prep.change_targets(data)
+    model = build_ann(data["lookback"], data["X_train"].shape[2])
+
+    # Callbacks are helpers that watch training and intervene automatically.
+    callbacks = [
+        # EarlyStopping watches the VALIDATION loss. Once it stops improving
+        # for 12 straight epochs, training halts and the best weights are
+        # restored. This is what prevents overfitting: we stop at the moment
+        # the model is best at generalising, not at the moment it is best at
+        # memorising.
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=12, restore_best_weights=True,
+            verbose=int(verbose > 0),
+        ),
+        # If progress stalls for 6 epochs, halve the learning rate. Think of it
+        # as taking smaller, more careful steps as you close in on the answer.
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=6, min_lr=1e-6,
+            verbose=int(verbose > 0),
+        ),
+    ]
+
+    t0 = time.time()
+    history = model.fit(
+        data["X_train"], y_train_change,
+        validation_data=(data["X_val"], y_val_change),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=callbacks,
+        # NEVER set shuffle=False thinking it preserves time order — the
+        # windows already carry their own history internally, and shuffling
+        # them gives the optimiser a less biased gradient each step. The
+        # chronological integrity lives in the SPLIT, not in the batch order.
+        shuffle=True,
+        verbose=verbose,
+    )
+    return model, history, change_scaler, time.time() - t0
+
+
+def forecast(model, data: dict, change_scaler, split: str = "test") -> np.ndarray:
+    """Forecast one split ("val" or "test") in real units.
+
+    The network outputs a scaled CHANGE; this undoes the scaling and adds it
+    to the last known hour. Reporting metrics in scaled units is meaningless.
+    """
+    change = model.predict(data[f"X_{split}"], verbose=0)
+    return data_prep.level_from_change(
+        change, data[f"persistence_{split}"], change_scaler
+    )
+
+
 def run_for_target(target: str, make_data_figures: bool) -> dict:
     """Train, evaluate and plot one ANN for one pollutant."""
     print(f"\n{'#'*70}\n#  {MODEL_NAME}  —  {target}\n{'#'*70}")
@@ -218,60 +283,22 @@ def run_for_target(target: str, make_data_figures: bool) -> dict:
         plots.fig_target_distribution(data["df"], data_prep.TARGETS)
         plots.fig_split_diagram(data)
 
-    # === 2. BUILD ========================================================
-    model = build_ann(data["lookback"], data["X_train"].shape[2])
+    # === 2. BUILD AND TRAIN ==============================================
+    print(f"\n  Training (max {EPOCHS} epochs, batch size {BATCH_SIZE})...")
+    model, history, change_scaler, train_secs = train(data)
+    print(f"  Finished in {train_secs:.1f}s "
+          f"after {len(history.history['loss'])} epochs")
     print(f"\n  Architecture ({model.count_params():,} trainable parameters):")
     model.summary(print_fn=lambda s: print("   ", s))
 
-    # === 3. TRAIN ========================================================
-    # Callbacks are helpers that watch training and intervene automatically.
-    callbacks = [
-        # EarlyStopping watches the VALIDATION loss. Once it stops improving
-        # for 12 straight epochs, training halts and the best weights are
-        # restored. This is what prevents overfitting: we stop at the moment
-        # the model is best at generalising, not at the moment it is best at
-        # memorising.
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=12, restore_best_weights=True,
-            verbose=1,
-        ),
-        # If progress stalls for 6 epochs, halve the learning rate. Think of it
-        # as taking smaller, more careful steps as you close in on the answer.
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=6, min_lr=1e-6, verbose=1,
-        ),
-    ]
-
-    print(f"\n  Training (max {EPOCHS} epochs, batch size {BATCH_SIZE})...")
-    t0 = time.time()
-    history = model.fit(
-        data["X_train"], data["y_train_scaled"],
-        validation_data=(data["X_val"], data["y_val_scaled"]),
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=callbacks,
-        # NEVER set shuffle=False thinking it preserves time order — the
-        # windows already carry their own history internally, and shuffling
-        # them gives the optimiser a less biased gradient each step. The
-        # chronological integrity lives in the SPLIT, not in the batch order.
-        shuffle=True,
-        verbose=2,
-    )
-    train_secs = time.time() - t0
-    print(f"  Finished in {train_secs:.1f}s "
-          f"after {len(history.history['loss'])} epochs")
-
-    # === 4. PREDICT ON THE TEST SET ======================================
-    # This is the first and only time the test set is used.
-    y_pred_scaled = model.predict(data["X_test"], verbose=0).ravel()
-
-    # Undo the scaling so every number below is in real short tons / lbs.
-    # Reporting metrics in scaled units is meaningless — always invert first.
-    y_pred = data["y_scaler"].inverse_transform(
-        y_pred_scaled.reshape(-1, 1)).ravel()
+    # === 3. PREDICT ON THE TEST SET ======================================
+    # This is the first and only time the test set is used. forecast() adds
+    # the predicted change to the last known hour and undoes the scaling, so
+    # every number below is in real short tons / lbs.
+    y_pred = forecast(model, data, change_scaler)
     y_true = data["y_test"]
 
-    # === 5. SCORE ========================================================
+    # === 4. SCORE ========================================================
     metrics = evaluate(y_true, y_pred, data["persistence_test"])
     m, b = metrics["model"], metrics["persistence"]
     unit = "short tons" if "CO2" in target else "lbs"
@@ -288,7 +315,7 @@ def run_for_target(target: str, make_data_figures: bool) -> dict:
     print(f"\n  Verdict: the {MODEL_NAME} {verdict} the persistence baseline "
           f"on RMSE.")
 
-    # === 6. FIGURES ======================================================
+    # === 5. FIGURES ======================================================
     print("\n  Generating model figures...")
     plots.fig_training_history(history, target, MODEL_NAME)
     plots.fig_prediction_timeseries(data["ts_test"], y_true, y_pred, target,
@@ -299,7 +326,7 @@ def run_for_target(target: str, make_data_figures: bool) -> dict:
     plots.fig_error_breakdown(data["ts_test"], y_true, y_pred, target,
                               MODEL_NAME)
 
-    # === 7. SAVE =========================================================
+    # === 6. SAVE =========================================================
     # The trained model, so you never have to retrain to make a new figure.
     slug = "co2" if "CO2" in target else "nox"
     model.save(RESULTS_DIR / f"ann_{slug}.keras")

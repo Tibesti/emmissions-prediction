@@ -12,3 +12,6 @@ __pycache__/
 
 # Third-party operational data — not ours to publish, not used by the code
 raw-data/
+
+# Personal thesis write-up material (kept local, not published)
+thesis-write-up/

@@ -3,7 +3,7 @@
     "target": "CO2 Mass (short tons)",
     "model": "Transformer",
     "epochs_run": 29,
-    "train_seconds": 342.2,
+    "train_seconds": 343.6,
     "parameters": 78081,
     "n_train": 54102,
     "n_val": 11593,
@@ -27,17 +27,17 @@
     "target": "NOx Mass (lbs)",
     "model": "Transformer",
     "epochs_run": 30,
-    "train_seconds": 404.9,
+    "train_seconds": 362.7,
     "parameters": 78081,
     "n_train": 54102,
     "n_val": 11593,
     "n_test": 11594,
     "metrics": {
       "model": {
-        "mae": 104.64430236816406,
-        "rmse": 253.0984399645719,
-        "mape": 5.714643955230713,
-        "r2": 0.9523756504058838
+        "mae": 105.56686401367188,
+        "rmse": 254.80753306417375,
+        "mape": 5.6767578125,
+        "r2": 0.9517303109169006
       },
       "persistence": {
         "mae": 102.32424926757812,

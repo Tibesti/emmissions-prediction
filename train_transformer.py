@@ -5,12 +5,9 @@ The script deliberately uses src.data_prep.prepare(), so its windows, gap
 handling, chronological splits, scaling, and persistence baseline are exactly
 the same as the ANN experiment.
 
-The network predicts the CHANGE since the last observed hour (y_t - y_{t-1})
-rather than the absolute level. The final forecast is persistence plus that
-change, so an output of zero reproduces the persistence baseline exactly. A
-level-predicting model has to rebuild ~1,400 tons from scaled inputs every
-hour, and in steady operation it missed by ~29 tons where persistence missed
-by ~3; that is why it lost to persistence on MAE.
+Like the ANN, the network predicts the CHANGE since the last observed hour
+(y_t - y_{t-1}) rather than the absolute level, and the forecast is
+persistence plus that change. See data_prep.change_targets() for why.
 
 Run with:
     .venv/bin/python train_transformer.py
@@ -31,7 +28,6 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.preprocessing import StandardScaler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 import data_prep  # noqa: E402
@@ -147,26 +143,43 @@ def build_transformer(lookback: int, n_features: int) -> keras.Model:
     return model
 
 
-def change_targets(data: dict):
-    """Return the scaled hour-to-hour change for train/val, plus its scaler.
+def train(data: dict, seed: int = SEED, verbose: int = 2):
+    """Build and fit one Transformer on the scaled hour-to-hour change.
 
-    The scaler is fitted on the training changes only, as with every other
-    scaler in the project.
+    Returns (model, history, change_scaler, train_seconds).
     """
-    change_train = data["y_train"] - data["persistence_train"]
-    change_val = data["y_val"] - data["persistence_val"]
-    scaler = StandardScaler().fit(change_train.reshape(-1, 1))
-    return (
-        scaler.transform(change_train.reshape(-1, 1)).ravel(),
-        scaler.transform(change_val.reshape(-1, 1)).ravel(),
-        scaler,
+    keras.utils.set_random_seed(seed)
+    y_train_change, y_val_change, change_scaler = data_prep.change_targets(data)
+    model = build_transformer(data["lookback"], data["X_train"].shape[2])
+    callbacks = [
+        keras.callbacks.EarlyStopping(
+            monitor="val_loss", patience=12, restore_best_weights=True,
+            verbose=int(verbose > 0),
+        ),
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_loss", factor=0.5, patience=6, min_lr=1e-6,
+            verbose=int(verbose > 0),
+        ),
+    ]
+    started = time.time()
+    history = model.fit(
+        data["X_train"], y_train_change,
+        validation_data=(data["X_val"], y_val_change),
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        callbacks=callbacks,
+        shuffle=True,
+        verbose=verbose,
     )
+    return model, history, change_scaler, time.time() - started
 
 
-def predict_level(model, X, persistence, change_scaler) -> np.ndarray:
-    """Forecast in real units: last observed value + predicted change."""
-    change_scaled = model.predict(X, verbose=0).reshape(-1, 1)
-    return persistence + change_scaler.inverse_transform(change_scaled).ravel()
+def forecast(model, data: dict, change_scaler, split: str = "test") -> np.ndarray:
+    """Forecast one split ("val" or "test") in real units."""
+    change = model.predict(data[f"X_{split}"], verbose=0)
+    return data_prep.level_from_change(
+        change, data[f"persistence_{split}"], change_scaler
+    )
 
 
 def evaluate(y_true, y_pred, persistence) -> dict:
@@ -188,36 +201,13 @@ def evaluate(y_true, y_pred, persistence) -> dict:
 def run_for_target(target: str) -> dict:
     print(f"\n{'#' * 70}\n#  {MODEL_NAME} — {target}\n{'#' * 70}")
     data = data_prep.prepare(target)
-    y_train_change, y_val_change, change_scaler = change_targets(data)
-    model = build_transformer(data["lookback"], data["X_train"].shape[2])
+
+    print(f"\n  Training (max {EPOCHS} epochs, batch size {BATCH_SIZE})...")
+    model, history, change_scaler, train_seconds = train(data)
     print(f"\n  Architecture ({model.count_params():,} trainable parameters):")
     model.summary(print_fn=lambda line: print("   ", line))
 
-    callbacks = [
-        keras.callbacks.EarlyStopping(
-            monitor="val_loss", patience=12, restore_best_weights=True, verbose=1
-        ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss", factor=0.5, patience=6, min_lr=1e-6, verbose=1
-        ),
-    ]
-
-    print(f"\n  Training (max {EPOCHS} epochs, batch size {BATCH_SIZE})...")
-    started = time.time()
-    history = model.fit(
-        data["X_train"], y_train_change,
-        validation_data=(data["X_val"], y_val_change),
-        epochs=EPOCHS,
-        batch_size=BATCH_SIZE,
-        callbacks=callbacks,
-        shuffle=True,
-        verbose=2,
-    )
-    train_seconds = time.time() - started
-
-    prediction = predict_level(
-        model, data["X_test"], data["persistence_test"], change_scaler
-    )
+    prediction = forecast(model, data, change_scaler)
     metrics = evaluate(data["y_test"], prediction, data["persistence_test"])
     model_metrics = metrics["model"]
     baseline_metrics = metrics["persistence"]

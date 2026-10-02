@@ -1,0 +1,11 @@
+# Python 3.11. Versions are the ones every reported result was produced with.
+tensorflow==2.21.0
+scikit-learn==1.9.0
+scipy==1.17.1
+pandas==3.0.5
+numpy==2.4.6
+matplotlib==3.11.1
+
+# Notebooks
+jupyterlab==4.6.3
+ipykernel==7.3.0

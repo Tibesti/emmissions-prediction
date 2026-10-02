@@ -260,7 +260,7 @@ def build_windows(df: pd.DataFrame, target: str, lookback: int = LOOKBACK):
 
     One training example looks like this, for lookback=24:
 
-        X  =  rows t-24 ... t-1   (24 rows x 18 columns of numbers)
+        X  =  rows t-24 ... t-1   (24 rows x 17 columns of numbers)
         y  =  the target value at row t   (a single number)
 
     Read that carefully, because it is what protects this project from a fatal
@@ -382,6 +382,41 @@ def scale_target(y_train, y_val, y_test):
         return scaler.transform(v.reshape(-1, 1)).ravel()
 
     return apply(y_train), apply(y_val), apply(y_test), scaler
+
+
+# ----------------------------------------------------------------------------
+# STEP 8 — THE TRAINING TARGET: CHANGE SINCE THE LAST HOUR
+# ----------------------------------------------------------------------------
+
+def change_targets(data: dict):
+    """Return the scaled hour-to-hour change for train/val, plus its scaler.
+
+    Hourly emissions are highly persistent, so "next hour = this hour" is a
+    strong baseline. A model asked to predict the absolute level (~1,400 tons
+    of CO2) has to rebuild that number from scaled inputs every hour, and in
+    steady operation it missed by ~29 tons where persistence missed by ~3.
+    So every model predicts the CHANGE  y_t - y_{t-1}  instead, and the
+    forecast is  y_{t-1} + predicted change  (see level_from_change). An
+    output of zero reproduces persistence exactly; the network only has to
+    learn the departures from it.
+
+    This uses no extra information: y_{t-1} is already the last row of every
+    input window. The scaler is fitted on the training changes only.
+    """
+    change_train = data["y_train"] - data["persistence_train"]
+    change_val = data["y_val"] - data["persistence_val"]
+    scaler = StandardScaler().fit(change_train.reshape(-1, 1))
+    return (
+        scaler.transform(change_train.reshape(-1, 1)).ravel(),
+        scaler.transform(change_val.reshape(-1, 1)).ravel(),
+        scaler,
+    )
+
+
+def level_from_change(change_scaled, persistence, scaler) -> np.ndarray:
+    """Turn a model's scaled change prediction into a forecast in real units."""
+    change = scaler.inverse_transform(np.reshape(change_scaled, (-1, 1))).ravel()
+    return persistence + change
 
 
 # ----------------------------------------------------------------------------

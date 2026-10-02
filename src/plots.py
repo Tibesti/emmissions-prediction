@@ -159,17 +159,24 @@ def fig_block_lengths(df: pd.DataFrame, lookback: int) -> None:
     throwing away most of your data. They don't — so the method is cheap.
     """
     sizes = df.groupby("block_id").size().sort_values(ascending=False)
+    minimum = lookback + 1
+    usable = sizes >= minimum
 
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.bar(range(len(sizes)), sizes.values, color=C_ACTUAL, width=0.75)
-    ax.axhline(lookback + 1, color=C_WARN, linestyle="--", linewidth=1.4)
-    ax.text(len(sizes) * 0.55, (lookback + 1) * 1.5,
-            f"minimum usable length ({lookback + 1} h)",
-            color=C_WARN, fontsize=9)
+    ax.bar(range(len(sizes)), sizes.values, width=0.75,
+           color=np.where(usable, C_ACTUAL, GRID))
+    ax.axhline(minimum, color=C_WARN, linestyle="--", linewidth=1.4)
+    ax.text(len(sizes) - 0.5, minimum * 2.0,
+            f"minimum {minimum} h",
+            color=C_WARN, fontsize=9, ha="right")
     ax.set_yscale("log")  # blocks range from a few hours to several years
+    ax.set_xticks(range(len(sizes)), range(1, len(sizes) + 1))
+    ax.grid(axis="x", visible=False)
     ax.set_xlabel("Continuous operating block (longest to shortest)")
     ax.set_ylabel("Length (hours, log scale)")
-    ax.set_title("Every block is long enough to train on", loc="left")
+    ax.set_title(f"{int(usable.sum())} of {len(sizes)} blocks are long enough to "
+                 f"form a window; the {int((~usable).sum())} grey ones hold only "
+                 f"{int(sizes[~usable].sum())} hours", loc="left")
     _save(fig, "02_block_lengths")
 
 
@@ -258,12 +265,11 @@ def fig_target_distribution(df: pd.DataFrame, targets: list[str]) -> None:
         ax.hist(df[target], bins=70, color=colour, edgecolor="white",
                 linewidth=0.3)
         mean, med = df[target].mean(), df[target].median()
-        ax.axvline(mean, color=C_WARN, linestyle="--", linewidth=1.4)
-        ax.text(mean, ax.get_ylim()[1] * 0.92, f"  mean {mean:,.0f}",
-                color=C_WARN, fontsize=9)
-        ax.axvline(med, color=INK_2, linestyle=":", linewidth=1.4)
-        ax.text(med, ax.get_ylim()[1] * 0.82, f"  median {med:,.0f}",
-                color=INK_2, fontsize=9, ha="right")
+        ax.axvline(mean, color=C_WARN, linestyle="--", linewidth=1.4,
+                   label=f"mean {mean:,.0f}")
+        ax.axvline(med, color=INK_2, linestyle=":", linewidth=1.4,
+                   label=f"median {med:,.0f}")
+        ax.legend(loc="upper right")
         ax.set_xlabel(f"{target} per hour")
         ax.set_ylabel("Number of hours")
         ax.set_title(target.split(" Mass")[0], loc="left")
@@ -280,8 +286,8 @@ def fig_split_diagram(data: dict) -> None:
     fig, ax = plt.subplots(figsize=(11, 2.6))
     spans = [
         ("Train (70%)", data["ts_train"], C_ACTUAL),
-        ("Validation (15%)", data["ts_val"], C_BASE),
-        ("Test (15%)", data["ts_test"], C_PRED),
+        ("Validation\n(15%)", data["ts_val"], C_BASE),
+        ("Test\n(15%)", data["ts_test"], C_PRED),
     ]
     for i, (label, ts, colour) in enumerate(spans):
         start, end = pd.Timestamp(ts[0]), pd.Timestamp(ts[-1])
@@ -289,7 +295,7 @@ def fig_split_diagram(data: dict) -> None:
                 edgecolor="white", linewidth=2)
         # Direct label on the bar — no legend needed.
         ax.text(start + (end - start) / 2, 0, f"{label}\n{len(ts):,} windows",
-                ha="center", va="center", color="white", fontsize=9,
+                ha="center", va="center", color="white", fontsize=8.5,
                 fontweight="bold")
         ax.text(start, -0.34, f"{start:%b %Y}", fontsize=8, color=INK_2)
     ax.set_ylim(-0.6, 0.4)
@@ -495,3 +501,125 @@ def fig_error_breakdown(ts, y_true, y_pred, target, model_name) -> None:
                  fontsize=12, fontweight="bold", x=0.02, ha="left")
     fig.tight_layout()
     _save(fig, f"12_{_slug(target)}_{model_name.lower()}_error_breakdown")
+
+
+# ===========================================================================
+# PART C — FIGURES THAT COMPARE ARCHITECTURES
+# Produced by compare_models.py from several training seeds per model.
+# ===========================================================================
+
+# One fixed colour per series across every comparison figure.
+MODEL_COLOURS = {"ANN": C_ACCENT, "Transformer": C_PRED, "Persistence": C_BASE}
+
+
+def fig_model_comparison(runs: pd.DataFrame, persistence: dict) -> None:
+    """Test-set MAE and RMSE for every model and seed, against persistence.
+
+    HOW TO READ IT: each small dot is one training run (one random seed); the
+    large marker is their mean and the vertical line spans best to worst seed.
+    The dashed line is persistence. If one model's whole range sits below the
+    other's, the ranking does not depend on luck of initialisation. Dots are
+    used instead of bars because the differences are small next to the
+    values themselves, and bars must start at zero.
+    """
+    targets = list(dict.fromkeys(runs["target"]))
+    models = list(dict.fromkeys(runs["model"]))
+    fig, axes = plt.subplots(len(targets), 2, figsize=(10, 3.6 * len(targets)),
+                             squeeze=False)
+    rng = np.random.default_rng(0)
+    for r, target in enumerate(targets):
+        for c, (metric, label) in enumerate([("mae", "MAE"), ("rmse", "RMSE")]):
+            ax = axes[r, c]
+            for i, model in enumerate(models):
+                vals = runs.loc[(runs["target"] == target)
+                                & (runs["model"] == model), metric].to_numpy()
+                colour = MODEL_COLOURS.get(model, C_ACTUAL)
+                ax.vlines(i, vals.min(), vals.max(), color=colour, linewidth=2)
+                ax.scatter(i + rng.uniform(-0.08, 0.08, len(vals)), vals, s=16,
+                           color=colour, alpha=0.55, edgecolors="none", zorder=3)
+                ax.scatter(i, vals.mean(), s=90, color=colour, edgecolors="white",
+                           linewidth=1.2, zorder=4)
+                ax.text(i + 0.14, vals.mean(), f"{vals.mean():,.1f}",
+                        va="center", fontsize=9, fontweight="bold", color=INK)
+            base = persistence[target][metric]
+            ax.axhline(base, color=MODEL_COLOURS["Persistence"], linestyle="--",
+                       linewidth=1.4)
+            ax.text(len(models) - 0.5, base, f"persistence {base:,.1f}",
+                    ha="right", va="bottom", fontsize=9,
+                    color=MODEL_COLOURS["Persistence"])
+            ax.set_xticks(range(len(models)), models)
+            ax.set_xlim(-0.5, len(models) - 0.5)
+            ax.grid(axis="x", visible=False)
+            ax.set_ylabel(f"{label} ({_unit(target)}/hour)")
+            ax.set_title(f"{target.split(' Mass')[0]} — test {label}", loc="left")
+    fig.suptitle(f"ANN vs Transformer across {runs['seed'].nunique()} training seeds",
+                 fontsize=12, fontweight="bold", x=0.02, ha="left")
+    fig.tight_layout()
+    _save(fig, "13_model_comparison")
+
+
+def fig_comparison_timeseries(ts, y_true, persistence, preds: dict, target,
+                              hours: int = 96) -> None:
+    """Actual vs every model over the most volatile stretch of the test set.
+
+    WHY THIS STRETCH: in steady hours every forecaster, including persistence,
+    sits on top of the actual line, so a random window shows nothing. This
+    picks the continuous `hours`-long window with the most hour-to-hour
+    movement, which is where the architectures actually differ.
+    """
+    t = pd.to_datetime(ts)
+    move = np.abs(y_true - persistence)
+    window = np.convolve(move, np.ones(hours), mode="valid")
+    continuous = (t[hours - 1:] - t[:len(window)]) == pd.Timedelta(hours=hours - 1)
+    window = np.where(continuous, window, -np.inf)
+    s = slice(int(np.argmax(window)), int(np.argmax(window)) + hours)
+
+    fig, ax = plt.subplots(figsize=(11, 4.2))
+    ax.plot(t[s], y_true[s], color=C_ACTUAL, linewidth=2.2, label="Actual (measured)")
+    ax.plot(t[s], persistence[s], color=MODEL_COLOURS["Persistence"],
+            linestyle="--", linewidth=1.3, label="Persistence")
+    for name, pred in preds.items():
+        ax.plot(t[s], pred[s], color=MODEL_COLOURS.get(name, C_WARN),
+                linewidth=1.5, label=name)
+    ax.set_ylabel(f"{target}\n({_unit(target)}/hour)")
+    ax.set_xlabel("Date")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b\n%H:%M"))
+    ax.set_title(f"Most volatile {hours // 24} days of the test set — {target}",
+                 loc="left")
+    ax.legend(ncol=len(preds) + 2)
+    _save(fig, f"14_{_slug(target)}_comparison_timeseries")
+
+
+def fig_error_by_regime(by_target: dict) -> None:
+    """MAE per quartile of hour-to-hour change, for every model and persistence.
+
+    HOW TO READ IT: the test hours are sorted by how much emissions moved
+    since the previous hour and cut into four equal groups. Persistence's
+    error in each group is exactly that movement, so it rises steeply. A
+    forecaster earns its keep in the right-hand groups (ramps); in the
+    left-hand group (steady operation) persistence is close to unbeatable.
+
+    by_target: {target: {"y_true": ..., "persistence": ..., "preds": {name: ...}}}
+    """
+    fig, axes = plt.subplots(1, len(by_target), figsize=(5.4 * len(by_target), 3.9),
+                             squeeze=False)
+    labels = ["Q1\nsteadiest", "Q2", "Q3", "Q4\nbiggest ramps"]
+    for ax, (target, d) in zip(axes[0], by_target.items()):
+        move = np.abs(d["y_true"] - d["persistence"])
+        quartile = pd.qcut(move, 4, labels=False, duplicates="drop")
+        series = {**d["preds"], "Persistence": d["persistence"]}
+        width = 0.8 / len(series)
+        for j, (name, pred) in enumerate(series.items()):
+            err = np.abs(d["y_true"] - pred)
+            mae = [err[quartile == q].mean() for q in range(4)]
+            ax.bar(np.arange(4) + (j - (len(series) - 1) / 2) * width, mae,
+                   width=width, color=MODEL_COLOURS.get(name, C_ACTUAL), label=name)
+        ax.set_xticks(range(4), labels)
+        ax.grid(axis="x", visible=False)
+        ax.set_ylabel(f"MAE ({_unit(target)}/hour)")
+        ax.set_title(target.split(" Mass")[0], loc="left")
+    axes[0][0].legend(loc="upper left")
+    fig.suptitle("Test error by size of the hour-to-hour change",
+                 fontsize=12, fontweight="bold", x=0.02, ha="left")
+    fig.tight_layout()
+    _save(fig, "15_error_by_regime")
