@@ -2,18 +2,18 @@
   {
     "target": "CO2 Mass (short tons)",
     "model": "Transformer",
-    "epochs_run": 44,
-    "train_seconds": 1455.6,
-    "parameters": 73985,
+    "epochs_run": 29,
+    "train_seconds": 342.2,
+    "parameters": 78081,
     "n_train": 54102,
     "n_val": 11593,
     "n_test": 11594,
     "metrics": {
       "model": {
-        "mae": 65.44454193115234,
-        "rmse": 113.57646446887665,
-        "mape": 4.489682197570801,
-        "r2": 0.9747498035430908
+        "mae": 53.87677001953125,
+        "rmse": 107.22210174009135,
+        "mape": 3.4791150093078613,
+        "r2": 0.9774962067604065
       },
       "persistence": {
         "mae": 53.20573043823242,
@@ -26,18 +26,18 @@
   {
     "target": "NOx Mass (lbs)",
     "model": "Transformer",
-    "epochs_run": 39,
-    "train_seconds": 1106.2,
-    "parameters": 73985,
+    "epochs_run": 30,
+    "train_seconds": 404.9,
+    "parameters": 78081,
     "n_train": 54102,
     "n_val": 11593,
     "n_test": 11594,
     "metrics": {
       "model": {
-        "mae": 120.26949310302734,
-        "rmse": 263.47616116073954,
-        "mape": 7.04025411605835,
-        "r2": 0.9483901262283325
+        "mae": 104.64430236816406,
+        "rmse": 253.0984399645719,
+        "mape": 5.714643955230713,
+        "r2": 0.9523756504058838
       },
       "persistence": {
         "mae": 102.32424926757812,

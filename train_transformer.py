@@ -124,7 +124,13 @@ def build_transformer(lookback: int, n_features: int) -> keras.Model:
         encoded = transformer_block(encoded, block_number)
 
     encoded = layers.LayerNormalization(epsilon=1e-6, name="final_norm")(encoded)
-    encoded = layers.GlobalAveragePooling1D(name="temporal_pooling")(encoded)
+    # The most recent hour carries most of the signal for a one-hour-ahead
+    # forecast; averaging all 24 positions alone dilutes it. Keep the last
+    # timestep's encoding and the window average side by side.
+    last_hour = layers.Cropping1D((lookback - 1, 0), name="last_hour")(encoded)
+    last_hour = layers.Flatten(name="last_hour_flat")(last_hour)
+    window_mean = layers.GlobalAveragePooling1D(name="temporal_pooling")(encoded)
+    encoded = layers.Concatenate(name="pooled")([last_hour, window_mean])
     encoded = layers.Dense(64, activation="gelu", name="regression_hidden")(encoded)
     encoded = layers.Dropout(DROPOUT)(encoded)
     outputs = layers.Dense(1, name="next_hour_emissions")(encoded)
@@ -132,7 +138,10 @@ def build_transformer(lookback: int, n_features: int) -> keras.Model:
     model = keras.Model(inputs, outputs, name="Transformer_emissions_forecaster")
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss="mse",
+        # Huber is squared for small errors and linear for large ones, so
+        # rare startup/shutdown ramps don't dominate training the way they do
+        # under MSE. That trade mainly improves MAE.
+        loss=keras.losses.Huber(delta=1.0),
         metrics=["mae"],
     )
     return model

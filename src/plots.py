@@ -326,7 +326,9 @@ def fig_training_history(history, target: str, model_name: str) -> None:
             color=INK_2, fontsize=9)
 
     ax.set_xlabel("Epoch")
-    ax.set_ylabel("Mean squared error (scaled units)")
+    loss = getattr(history.model, "loss", "mse")
+    loss_label = "Mean squared error" if loss == "mse" else "Huber loss"
+    ax.set_ylabel(f"{loss_label} (scaled units)")
     ax.set_title(f"{model_name} training history — {target}", loc="left")
     ax.legend()
     _save(fig, f"07_{_slug(target)}_{model_name.lower()}_training_history")
