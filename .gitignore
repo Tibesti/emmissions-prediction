@@ -1,0 +1,14 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Local Claude Code settings
+.claude/
+
+# Third-party operational data — not ours to publish, not used by the code
+raw-data/
